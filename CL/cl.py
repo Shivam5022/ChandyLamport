@@ -3,7 +3,7 @@ import json
 import socket
 import time
 import threading
-from multiprocessing import Process
+from multiprocessing import Process, Barrier
 from typing import Final, Optional, Any, Iterator, List
 
 data = [[("key1", "value1"), ("key2", "value2")], [("key3", "value3"), ("key4", "value4")]]
@@ -32,14 +32,10 @@ class Mapper(Process):
     data = f"{key},{value},{self.id}".encode()
     length_prefix = f"{len(data):<10}".encode()
     socket.sendall(length_prefix + data)
-    
-  # def run(self):  # just for testing
-  #   for key, value in data[self.idx]:
-  #     self.send_data(self.R1_socket, key, value)
-  #     self.send_data(self.R2_socket, key, value)
   
   def run(self):
     count = 0
+    howMuchToSend = 0
     try:
       while True:
         # here we will read file name from redis stream in an infinite loop
@@ -48,10 +44,16 @@ class Mapper(Process):
         key = "hello"
         value = 2
         self.send_data(self.R1_socket, key, value)
+        key = "world"
+        value = 3
+        self.send_data(self.R2_socket, key, value)
         count = (count + 1) % 10
         if count == 0: # sending checkpoint markers after every 10 files
           self.send_data(self.R1_socket, "MARKER", -1)
           self.send_data(self.R2_socket, "MARKER", -1)
+        howMuchToSend += 1
+        if (howMuchToSend == 20):
+          break
     except Exception as e:
         print(f"Error: {e}")
     finally:
@@ -68,8 +70,7 @@ class Reducer(Process):
     self.store: dict[str, int] = {}
     self.checkpoint_counter = 1  # checkpoint files will be named f"checkpoint/id_{checkpoint_counter}"
     self.markers = 0
-    # self.lock = threading.Lock()
-    # self.barrrier = threading.Barrier(2)
+    self.barrier = Barrier(2)
   
   def wordCount(self, key, value):
     if key in self.store:
@@ -78,7 +79,7 @@ class Reducer(Process):
       self.store[key] = value
   
   def checkpoint(self):
-    filename = f"checkpoint/{self.id}_{self.checkpoint_counter}"
+    filename = f"checkpoints/{self.id}_{self.checkpoint_counter}.txt"
     with open(filename, 'w') as file:
       json.dump(self.store, file)
     self.checkpoint_counter += 1
@@ -95,14 +96,18 @@ class Reducer(Process):
             key, value, id = data.split(',')
             value = int(value)
             logging.info(f"{name} has Received from {id}: Key={key}, Value={value}")
-            print(f"{name} has Received from {id}: Key={key}, Value={value}")
+            # print(f"{name} has Received from {id}: Key={key}, Value={value}")
             if value != -1:  # normal (string, int) received
-              print("DATA RECEIVED")
               self.wordCount(key, value)
             else: # received checkpoint marker
               # some complex logic here for making sure we have both markers
               # self.checkpoint()
-              print("MARKER RECEIVED")
+              current_thread = threading.current_thread()
+              print(f"[{current_thread.ident}] {name} has Received MARKER from {id}")
+              self.barrier.wait()
+              print("BOTH MARKERS RECEIVED")
+              if checkpointThread == 1:
+                self.checkpoint()
 
     except Exception as e:
         print(f"Error: {e}")
@@ -131,7 +136,7 @@ class Reducer(Process):
 
 class SetupMapReduce():
   def __init__(self) -> None:
-    self.reducer_ports = [5003, 5004]
+    self.reducer_ports = [5023, 5024]
     self.startReducers()
     time.sleep(2)
     self.startMappers()
